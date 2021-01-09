@@ -7,7 +7,24 @@
 #include "tcp/tcp_types.h"
 namespace basic{
 class TpProxyRight;
-class TpProxyLeft:public EpollCallbackInterface{
+class TpProxyBase{
+public:
+    TpProxyBase(basic::BaseContext *context,int fd);
+    virtual ~TpProxyBase(){}
+protected:
+    void FlushBuffer();
+    void DeleteSelf();
+    void OnCanWrite(int fd);
+    basic::BaseContext* context_=nullptr;
+    int fd_=-1;
+    std::string write_buffer_;
+    std::atomic<bool> destroyed_{false};
+    int send_bytes_=0;
+    int recv_bytes_=0;
+    uint8_t signal_=0;
+};
+class TpProxyLeft:public TpProxyBase,
+public EpollCallbackInterface{
 public:
     TpProxyLeft(basic::BaseContext *context,int fd);
     ~TpProxyLeft();
@@ -21,21 +38,12 @@ public:
     void OnShutdown(basic::EpollServer* eps, int fd) override;
     std::string Name() const override;
 private:
-    void OnReadEvent(int fd);
-    void OnCanWrite(int fd);
-    void FlushBuffer();
     void Close();
-    void DeleteSelf();
-    basic::BaseContext* context_=nullptr;
-    int fd_=-1;
-    std::atomic<bool> destroyed_{false};
+    void OnReadEvent(int fd);
     TpProxyRight *right_=nullptr;
-    std::string write_buffer_;
-    int send_bytes_=0;
-    int recv_bytes_=0;
-    uint8_t signal_=0;
 };
-class TpProxyRight:public EpollCallbackInterface{
+class TpProxyRight:public TpProxyBase,
+public EpollCallbackInterface{
 public:
     TpProxyRight(basic::BaseContext *context,int fd);
     ~TpProxyRight();
@@ -52,19 +60,10 @@ public:
     std::string Name() const override;
 private:
     void OnReadEvent(int fd);
-    void OnCanWrite(int fd);
-    void FlushBuffer();
     void Close();
-    void DeleteSelf();
-    basic::BaseContext* context_=nullptr;
     struct sockaddr_storage src_addr_;
     struct sockaddr_storage dst_addr_;
-    int fd_=-1;
-    std::atomic<bool> destroyed_{false};
     TpProxyLeft *left_=nullptr;
-    std::string write_buffer_;
-    int send_bytes_=0;
-    int recv_bytes_=0;
     TcpConnectionStatus status_{DISCONNECT};
     uint8_t signal_=0;
 };
@@ -77,7 +76,5 @@ class TpProxyFactory: public SocketServerFactory{
 public:
     ~TpProxyFactory(){}
     PhysicalSocketServer* CreateSocketServer(BaseContext *context) override;
-private:
-    TpProxyBackend backend_;
 };     
 }

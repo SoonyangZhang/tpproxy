@@ -22,8 +22,60 @@ Hang  up   happened   on   the   associated   file   descriptor.
 epoll_wait(2)  will always wait for this event; it is not neces-
 sary to set it in events.
 */
-TpProxyLeft::TpProxyLeft(basic::BaseContext *context,int fd):
-context_(context),fd_(fd){
+TpProxyBase::TpProxyBase(basic::BaseContext *context,int fd):context_(context),fd_(fd){}
+void TpProxyBase::FlushBuffer(){
+    if(fd_<0){
+        return ;
+    }
+    int remain=write_buffer_.size();
+    int offset=0;
+    const char *data=write_buffer_.data();
+    bool flushed=false;
+    while(remain>0){
+        int intend=std::min(kBufferSize,(int)(remain-offset));
+        int sent=write(fd_,data,intend);
+        if(sent<=0){
+            break;
+        }
+        send_bytes_+=sent;
+        flushed=true;
+        data+=sent;
+        offset+=sent;
+        remain-=sent;
+    }
+    if(flushed){
+        if(remain>0){
+            std::string copy(data,remain);
+            copy.swap(write_buffer_);
+            
+        }else{
+            std::string null_str;
+            null_str.swap(write_buffer_);
+        }        
+    }
+}
+void TpProxyBase::DeleteSelf(){
+    if(destroyed_){
+        return;
+    }
+    destroyed_=true;
+    context_->PostTask([this]{
+        delete this;
+    });
+}
+void TpProxyBase::OnCanWrite(int fd){
+    FlushBuffer();
+    if(write_buffer_.size()>0){
+       context_->epoll_server()->ModifyCallback(fd_,EPOLLIN|EPOLLOUT|EPOLLET|EPOLLRDHUP|EPOLLERR); 
+    }else{
+        context_->epoll_server()->ModifyCallback(fd_,EPOLLIN|EPOLLET|EPOLLRDHUP|EPOLLERR);
+    }
+    if((signal_==TPPROXY_CLOSE)&&write_buffer_.size()==0){
+        context_->epoll_server()->UnregisterFD(fd_);
+    }
+}
+
+TpProxyLeft::TpProxyLeft(basic::BaseContext *context,int fd):TpProxyBase(context,fd){
     context_->epoll_server()->RegisterFD(fd_,this,EPOLLIN|EPOLLET|EPOLLRDHUP| EPOLLERR);
     struct sockaddr_storage remote_addr;
     /*IpAddress ip_addr;
@@ -129,45 +181,6 @@ void TpProxyLeft::OnReadEvent(int fd){
         }       
     }    
 }
-void TpProxyLeft::OnCanWrite(int fd){
-    FlushBuffer();
-    if(write_buffer_.size()>0){
-       context_->epoll_server()->ModifyCallback(fd_,EPOLLIN|EPOLLOUT|EPOLLET|EPOLLRDHUP|EPOLLERR); 
-    }else{
-        context_->epoll_server()->ModifyCallback(fd_,EPOLLIN|EPOLLET|EPOLLRDHUP|EPOLLERR);
-    }
-    if((signal_==TPPROXY_CLOSE)&&write_buffer_.size()==0){
-        context_->epoll_server()->UnregisterFD(fd_);
-    }
-}
-void TpProxyLeft::FlushBuffer(){
-    int remain=write_buffer_.size();
-    int offset=0;
-    const char *data=write_buffer_.data();
-    bool flushed=false;
-    while(remain>0){
-        int intend=std::min(kBufferSize,(int)(remain-offset));
-        int sent=write(fd_,data,intend);
-        if(sent<=0){
-            break;
-        }
-        send_bytes_+=sent;
-        flushed=true;
-        data+=sent;
-        offset+=sent;
-        remain-=sent;
-    }
-    if(flushed){
-        if(remain>0){
-            std::string copy(data,remain);
-            copy.swap(write_buffer_);
-            
-        }else{
-            std::string null_str;
-            null_str.swap(write_buffer_);
-        }        
-    }
-}
 void TpProxyLeft::Close(){
     if(right_){
         right_->Notify(TPPROXY_CLOSE);
@@ -178,18 +191,8 @@ void TpProxyLeft::Close(){
         fd_=-1;
     }    
 }
-void TpProxyLeft::DeleteSelf(){
-    if(destroyed_){
-        return;
-    }
-    destroyed_=true;
-    context_->PostTask([this]{
-        delete this;
-    });
-}
 
-TpProxyRight::TpProxyRight(basic::BaseContext *context,int fd):
-context_(context),fd_(fd){}
+TpProxyRight::TpProxyRight(basic::BaseContext *context,int fd):TpProxyBase(context,fd){}
 TpProxyRight::~TpProxyRight(){
     std::cout<<"right dtor "<<recv_bytes_<<" "<<send_bytes_<<std::endl;
 }
@@ -305,44 +308,6 @@ void TpProxyRight::OnReadEvent(int fd){
         }       
     }    
 }
-void TpProxyRight::OnCanWrite(int fd){
-    FlushBuffer();
-    if(write_buffer_.size()>0){
-       context_->epoll_server()->ModifyCallback(fd_,EPOLLIN|EPOLLOUT|EPOLLET|EPOLLRDHUP|EPOLLERR); 
-    }else{
-        context_->epoll_server()->ModifyCallback(fd_,EPOLLIN|EPOLLET|EPOLLRDHUP|EPOLLERR);
-    }
-    if((signal_==TPPROXY_CLOSE)&&write_buffer_.size()==0){
-        context_->epoll_server()->UnregisterFD(fd_);
-    }
-}
-void TpProxyRight::FlushBuffer(){
-    int remain=write_buffer_.size();
-    int offset=0;
-    const char *data=write_buffer_.data();
-    bool flushed=false;
-    while(remain>0){
-        int intend=std::min(kBufferSize,(int)(remain-offset));
-        int sent=write(fd_,data,intend);
-        if(sent<=0){
-            break;
-        }
-        send_bytes_+=sent;        
-        flushed=true;
-        data+=sent;
-        offset+=sent;
-        remain-=sent;
-    }
-    if(flushed){
-        if(remain>0){
-            std::string copy(data,remain);
-            copy.swap(write_buffer_);
-        }else{
-            std::string null_str;
-            null_str.swap(write_buffer_);
-        }        
-    }
-}
 void TpProxyRight::Close(){
     if(left_){
         left_->Notify(TPPROXY_CLOSE);
@@ -354,20 +319,12 @@ void TpProxyRight::Close(){
         fd_=-1;
     }    
 }
-void TpProxyRight::DeleteSelf(){
-    if(destroyed_){
-        return;
-    }
-    destroyed_=true;
-    context_->PostTask([this]{
-        delete this;
-    });
-}
 void TpProxyBackend::CreateEndpoint(basic::BaseContext *context,int fd){
     TpProxyLeft *endpoint=new TpProxyLeft(context,fd);
     UNUSED(endpoint);
 }
 PhysicalSocketServer* TpProxyFactory::CreateSocketServer(BaseContext *context){
-    return new PhysicalSocketServer(context,&backend_);
+    std::unique_ptr<TpProxyBackend> backend(new TpProxyBackend());
+    return new PhysicalSocketServer(context,std::move(backend));
 }
 }
