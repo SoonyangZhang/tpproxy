@@ -28,11 +28,10 @@ void TpProxyBase::FlushBuffer(){
         return ;
     }
     int remain=write_buffer_.size();
-    int offset=0;
     const char *data=write_buffer_.data();
     bool flushed=false;
     while(remain>0){
-        int intend=std::min(kBufferSize,(int)(remain-offset));
+        int intend=std::min(kBufferSize,remain);
         int sent=write(fd_,data,intend);
         if(sent<=0){
             break;
@@ -40,7 +39,6 @@ void TpProxyBase::FlushBuffer(){
         send_bytes_+=sent;
         flushed=true;
         data+=sent;
-        offset+=sent;
         remain-=sent;
     }
     if(flushed){
@@ -206,12 +204,12 @@ void TpProxyRight::SendData(const char *pv,size_t size){
     if(fd_<0){
         return ;
     }
-    if(status_!=CONNECTED){
+    if(status_!=TCP_CONNECTED){
         size_t old_size=write_buffer_.size();
         write_buffer_.resize(old_size+size);
         memcpy(&write_buffer_[old_size],pv,size);
     }
-    if(status_==CONNECTED){
+    if(status_==TCP_CONNECTED){
         FlushBuffer();
         size_t old_size=write_buffer_.size();
         if(old_size>0){
@@ -258,7 +256,7 @@ bool TpProxyRight::AsynConnect(SocketAddress &local,SocketAddress &remote){
             return success;                
         }   
     }
-    status_=CONNECTING;
+    status_=TCP_CONNECTING;
     return true;    
 }
 void TpProxyRight::OnRegistration(basic::EpollServer* eps, int fd, int event_mask){}
@@ -269,8 +267,8 @@ void TpProxyRight::OnEvent(int fd, basic::EpollEvent* event){
         Close();       
     }   
     if(event->in_events&EPOLLOUT){
-        if(status_==CONNECTING){
-            status_=CONNECTED;
+        if(status_==TCP_CONNECTING){
+            status_=TCP_CONNECTED;
             std::cout<<"right connected"<<std::endl;
             context_->epoll_server()->ModifyCallback(fd_,EPOLLIN|EPOLLRDHUP|EPOLLERR | EPOLLET);
         }
@@ -314,7 +312,7 @@ void TpProxyRight::Close(){
         left_=nullptr;
     }
     if(fd_>0){
-        status_=DISCONNECT;
+        status_=TCP_DISCONNECT;
         close(fd_);
         fd_=-1;
     }    

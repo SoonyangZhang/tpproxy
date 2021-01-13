@@ -64,7 +64,7 @@ private:
     struct sockaddr_storage src_addr_;
     struct sockaddr_storage dst_addr_;
     TpProxyLeft *left_=nullptr;
-    TcpConnectionStatus status_{DISCONNECT};
+    TcpConnectionStatus status_=TCP_DISCONNECT;
     uint8_t signal_=0;
 };
 class TpProxyBackend:public Backend{
