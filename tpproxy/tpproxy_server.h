@@ -5,30 +5,57 @@
 #include "base/socket_address.h"
 #include "tcp/tcp_server.h"
 #include "tcp/tcp_types.h"
-namespace basic{
-class TpProxyRight;
+#include "tcp/tcp_info.h"
+#include "tpproxy/bandwidth.h"
+#include "tpproxy/windowed_filter.h"
+#include "tpproxy/interval_budget.h"
+namespace basic{ 
 class TpProxyBase{
 public:
     TpProxyBase(basic::BaseContext *context,int fd);
-    virtual ~TpProxyBase(){}
+    virtual ~TpProxyBase();
     virtual void Notify(uint8_t sig){}
-    void SendData(const char *pv,size_t size);
     void set_peer(TpProxyBase *peer) {peer_=peer;}
+    void SendData(const char *pv,size_t size);
+    void OnGoodputAlarm();
+    void OnReadBudgetAlarm();
+    void OnWriteBudgetAlarm();
+    QuicBandwidth GoodputWithMinimum() const;
+    bool IsBufferAboveThreshold() const;
 protected:
+    using MaxBandwidthFilter = WindowedFilter<QuicBandwidth,
+                                            MaxFilter<QuicBandwidth>,
+                                            int64_t,
+                                            int64_t>;
     void FlushBuffer();
-    void OnCanWrite(int fd);
+    void OnReadEvent(int fd);
+    void OnWriteEvent(int fd);
+    bool CanSend(int64_t bytes) const;
+    void OnPacketSent(int64_t bytes);
+    void CreateReadAlarm();
     void CheckCloseFd();
     void CloseFd();
     void DeleteSelf();
     basic::BaseContext* context_=nullptr;
     int fd_=-1;
+    MaxBandwidthFilter max_goodput_;
+    IntervalBudget read_budget_;
+    IntervalBudget write_budget_;
+    std::unique_ptr<BaseAlarm> read_budget_alarm_;
+    std::unique_ptr<BaseAlarm> write_budget_alarm_;
+    std::unique_ptr<BaseAlarm> goodput_alarm_;
+    QuicTime last_goodput_time_=QuicTime::Zero();
+    QuicTime last_read_budget_time_=QuicTime::Zero();
+    QuicTime last_write_budget_time_=QuicTime::Zero();
     std::string fd_write_buffer_;
+    TpProxyBase *peer_=nullptr;
     std::atomic<bool> destroyed_{false};
-    int send_bytes_=0;
-    int recv_bytes_=0;
     TcpConnectionStatus status_=TCP_DISCONNECT;
     uint8_t signal_=0;
-    TpProxyBase *peer_=nullptr;
+    int send_bytes_=0;
+    int recv_bytes_=0;
+    uint64_t last_bytes_acked_=0;
+    uint64_t goodput_sample_count_=0;
 };
 class TpProxyLeft:public TpProxyBase,
 public EpollCallbackInterface{
@@ -43,8 +70,6 @@ public:
     void OnUnregistration(int fd, bool replaced) override {}
     void OnShutdown(basic::EpollServer* eps, int fd) override;
     std::string Name() const override {return "TpProxyLeft";}
-private:
-    void OnReadEvent(int fd);
 };
 class TpProxyRight:public TpProxyBase,
 public EpollCallbackInterface{
@@ -61,7 +86,6 @@ public:
     void OnShutdown(basic::EpollServer* eps, int fd) override;
     std::string Name() const override {return "TpProxyRight";}
 private:
-    void OnReadEvent(int fd);
     struct sockaddr_storage src_addr_;
     struct sockaddr_storage dst_addr_;
 };
