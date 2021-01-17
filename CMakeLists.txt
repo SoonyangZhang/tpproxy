@@ -10,6 +10,7 @@ include_directories(${CMAKE_SOURCE_DIR}/tcp)
 include_directories(${CMAKE_SOURCE_DIR}/tpproxy)
 add_subdirectory(base)
 set(tpproxy_src
+tpproxy/interval_budget.cc
 tpproxy/tpproxy_server_test.cc
 tpproxy/tpproxy_server.cc
 )
