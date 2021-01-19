@@ -24,11 +24,11 @@ sary to set it in events.
 */
 namespace{
 const QuicTime::Delta kGoodputInterval=QuicTime::Delta::FromMilliseconds(500);
-const QuicTime::Delta kWriteBudgetInterval=QuicTime::Delta::FromMilliseconds(50);
+const QuicTime::Delta kWriteBudgetInterval=QuicTime::Delta::FromMilliseconds(10);
 const QuicTime::Delta kReadBudgetInterval=QuicTime::Delta::FromMilliseconds(10);
 const QuicBandwidth kMinGoodput=QuicBandwidth::FromKBitsPerSecond(500);
-const int kBandwithWindowSize=10;
-const int kWriteBufferThreshold=1500*10;
+const int kBandwithWindowSize=5;
+const int kWriteBufferThreshold=1500*5;
 const size_t kBufferSize=1500;
 const double kBandwidthGain=1.25;
 }
@@ -101,30 +101,43 @@ void TpProxyBase::SendData(const char *pv,size_t size){
         write_budget_.IncreaseBudget(kWriteBudgetInterval.ToMilliseconds());
         write_budget_alarm_->Update(now+kWriteBudgetInterval,QuicTime::Delta::Zero());
     }
-    if(status_!=TCP_CONNECTED){
-        size_t old_size=fd_write_buffer_.size();
-        fd_write_buffer_.resize(old_size+size);
-        memcpy(&fd_write_buffer_[old_size],pv,size);
-    }
     if(status_==TCP_CONNECTED){
         FlushBuffer();
         size_t old_size=fd_write_buffer_.size();
         if(old_size>0){
             fd_write_buffer_.resize(old_size+size);
             memcpy(&fd_write_buffer_[old_size],pv,size);
+            //std::cout<<"return "<<std::endl;
             return;
         }
         if(old_size==0){
-            size_t sent=write(fd_,pv,size);
-            if(sent<size){
-                send_bytes_+=sent;
-                const char *data=pv+sent;
-                size_t remain=size-sent;
-                fd_write_buffer_.resize(old_size+remain);
-                memcpy(&fd_write_buffer_[old_size],data,remain);
-                context_->epoll_server()->ModifyCallback(fd_,EPOLLIN|EPOLLOUT|EPOLLET|EPOLLRDHUP|EPOLLERR);
+            int sent=send(fd_,pv,size,0);
+            if(sent>0){
+                if(sent<size){
+                    send_bytes_+=sent;
+                    const char *data=pv+sent;
+                    size_t remain=size-sent;
+                    fd_write_buffer_.resize(old_size+remain);
+                    memcpy(&fd_write_buffer_[old_size],data,remain);
+                    //std::cout<<"remain "<<remain<<" "<<size<<std::endl;
+                    context_->epoll_server()->ModifyCallback(fd_,EPOLLET|EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLERR);
+                }else{
+                    send_bytes_+=sent;
+                }               
+            }else{
+                size_t old_size=fd_write_buffer_.size();
+                fd_write_buffer_.resize(old_size+size);
+                memcpy(&fd_write_buffer_[old_size],pv,size);
+                context_->epoll_server()->ModifyCallback(fd_,EPOLLET|EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLERR);
+                //std::cout<<"SendData failed"<<std::endl;
             }
+
         }    
+    }else{
+        size_t old_size=fd_write_buffer_.size();
+        fd_write_buffer_.resize(old_size+size);
+        memcpy(&fd_write_buffer_[old_size],pv,size);
+        //std::cout<<"buffer "<<size<<std::endl;      
     }
 }
 void TpProxyBase::OnGoodputAlarm(){
@@ -170,7 +183,13 @@ void TpProxyBase::OnReadBudgetAlarm(){
     }
     last_read_budget_time_=now;
     read_budget_alarm_->Update(now+kReadBudgetInterval,QuicTime::Delta::Zero());
-    bool buffer_full=IsBufferAboveThreshold();
+    bool buffer_full=false;
+    if(peer_){
+        buffer_full=peer_->IsBufferAboveThreshold();
+    } 
+    /*if(buffer_full){
+        std::cout<<"buffer full"<<std::endl;
+    }*/
     if(fd_>0&&(!buffer_full)&&(status_==TCP_CONNECTED)){
         OnReadEvent(fd_);
     }
@@ -196,13 +215,14 @@ QuicBandwidth TpProxyBase::GoodputWithMinimum() const{
 }
 bool TpProxyBase::IsBufferAboveThreshold() const{
     bool ret=false;
-    if(fd_write_buffer_.size()>kWriteBufferThreshold){
+    if(fd_write_buffer_.size()>=kWriteBufferThreshold){
         ret=true;
     }
     return ret;
 }
 void TpProxyBase::FlushBuffer(){
     if(fd_<0){
+        CHECK(fd_write_buffer_.size()==0);
         return ;
     }
     size_t remain=fd_write_buffer_.size();
@@ -211,11 +231,13 @@ void TpProxyBase::FlushBuffer(){
     while(remain>0){
         size_t intend=std::min(kBufferSize,remain);
         if(CanSend(intend)){
-            int sent=write(fd_,data,intend);
+            int sent=send(fd_,data,intend,0);
             if(sent<=0){
+                //std::cout<<"flush failed"<<std::endl;
                 break;
             }
             send_bytes_+=sent;
+            CHECK(sent<=intend);
             flushed=true;
             data+=sent;
             remain-=sent;
@@ -240,10 +262,11 @@ void TpProxyBase::OnReadEvent(int fd){
     int64_t read_bytes=0;
     int64_t target=read_budget_.bytes_remaining();
     if(target<0){
+        std::cout<<"no read no budget"<<std::endl;
         return ;
     }
     while(true){
-        size_t nbytes=read(fd,buffer,kBufferSize);  
+        int nbytes=read(fd,buffer,kBufferSize);  
         if (nbytes == -1) {
             //if(errno == EWOULDBLOCK|| errno == EAGAIN){}
             break;            
@@ -254,6 +277,8 @@ void TpProxyBase::OnReadEvent(int fd){
             read_bytes+=nbytes;
             if(peer_){
                 peer_->SendData(buffer,nbytes);
+            }else{
+                CHECK(0);
             }
             if(read_bytes>=target){
                 break;
@@ -267,9 +292,9 @@ void TpProxyBase::OnReadEvent(int fd){
 void TpProxyBase::OnWriteEvent(int fd){
     FlushBuffer();
     if(fd_write_buffer_.size()>0){
-       context_->epoll_server()->ModifyCallback(fd_,EPOLLIN|EPOLLOUT|EPOLLET|EPOLLRDHUP|EPOLLERR); 
+       context_->epoll_server()->ModifyCallback(fd_,EPOLLET|EPOLLOUT|EPOLLRDHUP|EPOLLERR); 
     }else{
-        context_->epoll_server()->ModifyCallback(fd_,EPOLLIN|EPOLLET|EPOLLRDHUP|EPOLLERR);
+        context_->epoll_server()->ModifyCallback(fd_,EPOLLET|EPOLLRDHUP|EPOLLERR);
     }
     CheckCloseFd();
 }
@@ -386,7 +411,9 @@ void TpProxyLeft::OnEvent(int fd, basic::EpollEvent* event){
         OnWriteEvent(fd);
     }
     if(event->in_events &(EPOLLRDHUP|EPOLLHUP)){
-        CloseFd(); 
+        //warning: let read event handle close
+        //std::cout<<"not responce"<<std::endl;
+        //CloseFd(); 
     }    
 }
 void TpProxyLeft::OnShutdown(basic::EpollServer* eps, int fd){
@@ -422,7 +449,7 @@ bool TpProxyRight::AsynConnect(SocketAddress &local,SocketAddress &remote){
         CloseFd();
         return success;        
     }
-    context_->epoll_server()->RegisterFD(fd_, this,EPOLLIN|EPOLLOUT| EPOLLRDHUP | EPOLLERR | EPOLLET);
+    context_->epoll_server()->RegisterFD(fd_, this,EPOLLET|EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLERR);
     if(connect(fd_,(struct sockaddr *)&dst_addr_,addr_size) == -1&& errno != EINPROGRESS){
         //connect doesn't work, are we running out of available ports ? if yes, destruct the socket   
         if (errno == EAGAIN){
@@ -443,22 +470,22 @@ void TpProxyRight::OnShutdown(basic::EpollServer* eps, int fd){
 void TpProxyRight::OnEvent(int fd, basic::EpollEvent* event){
     if (event->in_events&(EPOLLERR|EPOLLRDHUP| EPOLLHUP)){
         CloseFd();       
-    }   
+    }  
+    if(event->in_events&EPOLLIN){
+        OnReadEvent(fd);
+    } 
     if(event->in_events&EPOLLOUT){
         if(status_==TCP_CONNECTING){
             status_=TCP_CONNECTED;
             std::cout<<"right connected"<<std::endl;
-            context_->epoll_server()->ModifyCallback(fd_,EPOLLIN|EPOLLRDHUP|EPOLLERR | EPOLLET);
+            context_->epoll_server()->ModifyCallback(fd_,EPOLLOUT|EPOLLRDHUP|EPOLLERR |EPOLLET);
             CreateReadAlarm();
             if(peer_){
                 peer_->Notify(TPPROXY_CONNECTED);
             }
         }
         OnWriteEvent(fd);
-    }
-    if(event->in_events&EPOLLIN){
-        OnReadEvent(fd);
-    }    
+    }   
 }
 void TpProxyBackend::CreateEndpoint(basic::BaseContext *context,int fd){
     TpProxyLeft *endpoint=new TpProxyLeft(context,fd);
